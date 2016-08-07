@@ -304,6 +304,10 @@ def decrypt_aes_cbc(ciphertext, key, iv, blocksize=16):
     return plain
 
 
+def random_aes_key(blocksize=16):
+    return afb(np.random.bytes(blocksize))
+
+
 # # # Tests for Crypto # # #
 
 
@@ -371,3 +375,9 @@ def test_aes_cbc_round_trip():
     ciphertext = encrypt_aes_cbc(plaintext, key, iv)
     result = decrypt_aes_cbc(ciphertext, key, iv)
     assert np.all(plaintext == result)
+
+
+def test_random_aes_key():
+    key = random_aes_key()
+    assert key.size == 16
+    assert key.dtype == np.uint8
