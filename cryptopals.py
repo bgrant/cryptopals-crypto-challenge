@@ -322,6 +322,35 @@ def random_aes_key(blocksize=16):
     return afb(np.random.bytes(blocksize))
 
 
+def encryption_oracle(plaintext, blocksize=16):
+    """Set 2 - Challenge 11
+
+    Encrypt data using a random key, with random padding, in ECB or CBC mode
+    (randomly).
+    """
+    left_pad, right_pad = np.random.randint(0, 5, 2)
+    padded = np.pad(plaintext, (left_pad, right_pad), mode='constant')
+
+    key = random_aes_key(blocksize=blocksize)
+
+    encryption_modes = ['ECB', 'CBC']
+    mode = np.random.choice(encryption_modes)
+
+    if mode == 'ECB':
+        cipher = encrypt_aes_ecb(pkcs7(padded, blocksize=blocksize),
+                                 key=key,
+                                 blocksize=blocksize)
+    elif mode == 'CBC':
+        cipher = encrypt_aes_cbc(pkcs7(padded, blocksize=blocksize),
+                                 key=key,
+                                 iv=random_aes_key(blocksize=blocksize),
+                                 blocksize=blocksize)
+    else:
+        assert False, 'Unreachable state'
+
+    return cipher
+
+
 # # # Tests for Crypto # # #
 
 
@@ -407,3 +436,9 @@ def test_random_aes_key():
     key = random_aes_key()
     assert key.size == 16
     assert key.dtype == np.uint8
+
+
+def test_encryption_oracle():
+    plaintext = afb(b"I was raised by a cup of coffee")
+    ciphertext = encryption_oracle(plaintext)
+    assert plaintext.size + 10 <= ciphertext.size <= plaintext.size + 20
