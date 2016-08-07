@@ -210,10 +210,10 @@ def decrypt_repeating_key_xor(data):
     return next(candidates)
 
 
-def decrypt_aes_ecb(data, key=afb(b'YELLOW SUBMARINE')):
+def decrypt_aes_ecb(data, key=afb(b'YELLOW SUBMARINE'), blocksize=16):
     """Set 1 - Challenge 7"""
-    data = pkcs7(data, 16)
-    key = pkcs7(key, 16)
+    data = pkcs7(data, blocksize)
+    key = pkcs7(key, blocksize)
     decrypter = AES.new(key, AES.MODE_ECB)
     return np.frombuffer(decrypter.decrypt(data), dtype=np.uint8)
 
@@ -271,7 +271,7 @@ def encrypt_aes_cbc(plaintext, key, iv, blocksize=16):
     return cipher
 
 
-def decrypt_aes_cbc(ciphertext, key, iv, blocksize=16):
+def decrypt_aes_cbc_serial(ciphertext, key, iv, blocksize=16):
     """Set 2 - Challenge 10"""
     cipher = pkcs7(ciphertext, blocksize=blocksize)
     cipher.shape = (-1, blocksize)
@@ -281,6 +281,25 @@ def decrypt_aes_cbc(ciphertext, key, iv, blocksize=16):
             plain[i] = decrypt_aes_ecb(cipher[i], key=key) ^ iv
         else:
             plain[i] = decrypt_aes_ecb(cipher[i], key=key) ^ cipher[i-1]
+    plain.shape = (-1,)
+    return plain
+
+
+def decrypt_aes_cbc(ciphertext, key, iv, blocksize=16):
+    """Set 2 - Challenge 10
+
+    Vectorized.
+    """
+    # decrypt
+    cipher = pkcs7(ciphertext, blocksize=blocksize)
+    plain = afb(decrypt_aes_ecb(cipher, key=key, blocksize=blocksize))
+
+    # XOR plaintext blocks with previous ciphertext blocks
+    # (iv for 0th block)
+    cipher.shape = (-1, blocksize)
+    plain.shape = (-1, blocksize)
+    plain = plain ^ np.vstack((iv, cipher[:-1]))
+
     plain.shape = (-1,)
     return plain
 
