@@ -1,6 +1,9 @@
 """
 Solutions to the Cryptopals Crypto Challenge
 
+All crypto functions take and return numpy arrays of uint8; convenience
+functions are provided to convert to and from this format.
+
 You will need the datafiles from the challenges to run the tests.
 """
 
@@ -57,9 +60,10 @@ def array_from_bytes(s):
 afb = array_from_bytes
 
 
-def line_array_from_hex_file(file):
+def line_array_from_hex_file(path):
+    """Returns a (potentially) ragged array of arrays."""
     lines = []
-    with open(file) as fh:
+    with open(path) as fh:
         for line in fh:
             lines.append(array_from_hex(line.strip()))
     return np.array(lines)
@@ -142,26 +146,37 @@ def _score_char(c):
 score_char = np.vectorize(_score_char)
 
 
-def decrypt_single_byte_xor(arr):
-    """Set 1 - Challenge 3"""
-    data = arr.reshape(1, -1)
+def decrypt_single_byte_xor(plaintext, return_score=False):
+    """Set 1 - Challenge 3
+
+    Discover the single-byte key and return plaintext.
+
+    If `return_score` is True, also return a 2-element array where element 0
+    is the message and element 1 is the score.
+    """
+    data = plaintext.reshape(1, -1)
     keys = np.arange(256, dtype=np.uint8).reshape(-1, 1)
     messages = data ^ keys
     scores = score_char(messages)
     message_scores = scores.sum(axis=1)
     best_message_index = message_scores.argmax()
-    return np.array([messages[best_message_index],
-                     message_scores[best_message_index]])
+    best_message = messages[best_message_index]
+    best_message_score = message_scores[best_message_index]
+    if return_score:
+        return np.array([best_message, best_message_score])
+    else:
+        return best_message
 
 
-def detect_single_character_xor(data):
+def detect_single_byte_xor(ciphertext_lines):
     """Set 1 - Challenge 4
 
-    data - object array returned from line_array_from_hex_file
+    ciphertext_lines: ragged array returned from line_array_from_hex_file
     """
-    best_messages = np.array([decrypt_single_byte_xor(msg) for msg in data])
-    very_best = best_messages[:, 1].argmax()
-    return best_messages[very_best]
+    messages = np.array([decrypt_single_byte_xor(line, return_score=True)
+                         for line in ciphertext_lines])
+    best_idx = messages[:, 1].argmax()
+    return messages[best_idx][0]
 
 
 def encrypt_repeating_key_xor(data, key):
@@ -171,15 +186,13 @@ def encrypt_repeating_key_xor(data, key):
 
 
 def normalized_hamming(data, keysize):
-    #h0 = hamming_distance(data[0*keysize:1*keysize], data[1*keysize:2*keysize])
-    #h1 = hamming_distance(data[1*keysize:2*keysize], data[2*keysize:3*keysize])
-    #h2 = hamming_distance(data[2*keysize:3*keysize], data[3*keysize:4*keysize])
-    #return ((h0 + h1 + h2) / 3) / keysize
+    """Hamming distance divided by keysize"""
     h0 = hamming_distance(data[0*keysize:3*keysize], data[3*keysize:6*keysize])
     return h0 / keysize
 
 
 def find_likely_keysizes(data):
+    """Returns a sorted list of (keysize, score), sorted by score"""
     keysizes = range(2, 41)
     norm_distances = []
     for keysize in keysizes:
@@ -305,6 +318,7 @@ def decrypt_aes_cbc(ciphertext, key, iv, blocksize=16):
 
 
 def random_aes_key(blocksize=16):
+    """Set 2 - Challenge 11"""
     return afb(np.random.bytes(blocksize))
 
 
@@ -321,6 +335,18 @@ def test_xor():
     expected = afh(b"746865206b696420646f6e277420706c6179")
     result = data ^ key
     assert np.all(expected == result)
+
+
+def test_decrypt_single_byte_xor():
+    hex_data = b'1b37373331363f78151b7f2b783431333d78397828372d363c78373e783a393b3736'
+    plaintext = bfa(decrypt_single_byte_xor(afh(hex_data)))
+    assert plaintext == b"Cooking MC's like a pound of bacon"
+
+
+def test_detect_single_byte_xor():
+    ciphertext = line_array_from_hex_file('./4.txt')
+    message = detect_single_byte_xor(ciphertext)
+    assert bfa(message) == b'Now that the party is jumping\n'
 
 
 def test_encrypt_repeating_key_xor():
