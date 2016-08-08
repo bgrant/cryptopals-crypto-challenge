@@ -322,19 +322,25 @@ def random_aes_key(blocksize=16):
     return afb(np.random.bytes(blocksize))
 
 
-def encryption_oracle(plaintext, blocksize=16):
+def encryption_oracle(plaintext, blocksize=16, force_mode=None):
     """Set 2 - Challenge 11
 
     Encrypt data using a random key, with random padding, in ECB or CBC mode
     (randomly).
+
+    For testing, you can force the mode to be 'ECB' or 'CBC', with
+    force_mode='ECB' or force_mode='CBC'
     """
-    left_pad, right_pad = np.random.randint(0, 5, 2)
+    left_pad, right_pad = np.random.randint(5, 11, 2)
     padded = np.pad(plaintext, (left_pad, right_pad), mode='constant')
 
     key = random_aes_key(blocksize=blocksize)
 
-    encryption_modes = ['ECB', 'CBC']
-    mode = np.random.choice(encryption_modes)
+    if force_mode:
+        mode = force_mode
+    else:
+        encryption_modes = ['ECB', 'CBC']
+        mode = np.random.choice(encryption_modes)
 
     if mode == 'ECB':
         cipher = encrypt_aes_ecb(pkcs7(padded, blocksize=blocksize),
@@ -349,6 +355,34 @@ def encryption_oracle(plaintext, blocksize=16):
         assert False, 'Unreachable state'
 
     return cipher
+
+
+def detect_encryption_mode(encryption_fn, blocksize=16, force_mode=None):
+    """Set 2 - Challenge 11
+
+    Given encryption function `encryption_fn` that takes as single argument
+    `plaintext`, determine if it's using ECB or CBC mode.
+
+    `force_mode` will be passed along to the underlying `fn`, which can be used
+    for testing.
+    """
+    # encrypt with known plaintext
+    blocksize = 16
+    nblocks = 10
+    plaintext = np.zeros(nblocks*blocksize, dtype=np.uint8)
+    ciphertext = encryption_fn(plaintext, blocksize=blocksize,
+                               force_mode=force_mode)
+
+    # count occurrences of each byte value
+    _, counts = np.unique(ciphertext, return_counts=True)
+
+    # see if there are at least `nblocks` repetitions of `blocksize` blocks
+    top_count = counts.max()
+
+    if top_count >= nblocks:
+        return 'ECB'
+    else:
+        return 'CBC'
 
 
 # # # Tests for Crypto # # #
@@ -440,5 +474,20 @@ def test_random_aes_key():
 
 def test_encryption_oracle():
     plaintext = afb(b"I was raised by a cup of coffee")
-    ciphertext = encryption_oracle(plaintext)
-    assert plaintext.size + 10 <= ciphertext.size <= plaintext.size + 20
+    ciphertext = encryption_oracle(plaintext, blocksize=16)
+    blocksize = 16
+    min_size = plaintext.size + 10
+    max_size = plaintext.size + 20 + (blocksize - 1)
+    assert min_size <= ciphertext.size <= max_size
+
+
+def test_detect_encryption_mode_ecb():
+    for i in range(10):
+        assert detect_encryption_mode(encryption_oracle,
+                                      force_mode='ECB') == 'ECB'
+
+
+def test_detect_encryption_mode_cbc():
+    for i in range(10):
+        assert detect_encryption_mode(encryption_oracle,
+                                      force_mode='CBC') == 'CBC'
