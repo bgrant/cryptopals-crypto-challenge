@@ -231,14 +231,14 @@ def decrypt_aes_ecb(data, key=afb(b'YELLOW SUBMARINE'), blocksize=16):
     return np.frombuffer(decrypter.decrypt(data), dtype=np.uint8)
 
 
-def detect_aes_ecb(data):
+def detect_aes_ecb(data, blocksize=16):
     """Set 1 - Challenge 8
 
     Returns index of AES ECB encoded row.
     """
     row_scores = []
     for i, row in enumerate(data):
-        blocks = row.view(dtype=np.dtype([('data', (np.uint8, 16))]))
+        blocks = row.view(dtype=np.dtype([('data', (np.uint8, blocksize))]))
         counts = np.unique(blocks, return_counts=True)[1]
         most_repetition = counts.max()
         row_scores.append((i, most_repetition))
@@ -263,10 +263,10 @@ def pkcs7(data, blocksize=16, return_len=False):
         return padded_data
 
 
-def encrypt_aes_ecb(data, key):
+def encrypt_aes_ecb(data, key, blocksize=16):
     """Set 2 - Challenge 10"""
-    data = pkcs7(data, 16)
-    key = pkcs7(key, 16)
+    data = pkcs7(data, blocksize)
+    key = pkcs7(key, blocksize)
     encrypter = AES.new(key, AES.MODE_ECB)
     return np.frombuffer(encrypter.encrypt(data), dtype=np.uint8)
 
