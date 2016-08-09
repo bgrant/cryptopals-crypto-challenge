@@ -385,6 +385,29 @@ def detect_encryption_mode(encryption_fn, blocksize=16, force_mode=None):
         return 'CBC'
 
 
+def random_ecb_encrypter(plaintext, blocksize=16,
+                         key=random_aes_key(blocksize=16)):
+    """Set 2 - Challenge 12
+
+    Encrypt data using a consistent random key, with random padding, in ECB
+    mode.
+
+    AES-128-ECB(padding || your-string || unknown-string || padding,
+                random-key)
+    """
+    unknown_plaintext = afb64(
+            b"Um9sbGluJyBpbiBteSA1LjAKV2l0aCBteSByYWctdG9wIGRvd2"
+            b"4gc28gbXkgaGFpciBjYW4gYmxvdwpUaGUgZ2lybGllcyBvbiBz"
+            b"dGFuZGJ5IHdhdmluZyBqdXN0IHRvIHNheSBoaQpEaWQgeW91IH"
+            b"N0b3A/IE5vLCBJIGp1c3QgZHJvdmUgYnkK")
+    plaintext = np.hstack((unknown_plaintext, plaintext))
+    left_pad, right_pad = np.random.randint(5, 11, 2)
+    padded = np.pad(plaintext, (left_pad, right_pad), mode='constant')
+    cipher = encrypt_aes_ecb(pkcs7(padded, blocksize=blocksize),
+                             key=key, blocksize=blocksize)
+    return cipher
+
+
 # # # Tests for Crypto # # #
 
 
@@ -474,8 +497,8 @@ def test_random_aes_key():
 
 def test_encryption_oracle():
     plaintext = afb(b"I was raised by a cup of coffee")
-    ciphertext = encryption_oracle(plaintext, blocksize=16)
     blocksize = 16
+    ciphertext = encryption_oracle(plaintext, blocksize=blocksize)
     min_size = plaintext.size + 10
     max_size = plaintext.size + 20 + (blocksize - 1)
     assert min_size <= ciphertext.size <= max_size
@@ -491,3 +514,13 @@ def test_detect_encryption_mode_cbc():
     for i in range(10):
         assert detect_encryption_mode(encryption_oracle,
                                       force_mode='CBC') == 'CBC'
+
+
+def test_random_ecb_encrypter():
+    plaintext = afb(b"I was raised by a cup of coffee")
+    blocksize = 16
+    ciphertext = random_ecb_encrypter(plaintext, blocksize=blocksize)
+    unknown_text_size = 184
+    min_size = plaintext.size + 10
+    max_size = unknown_text_size + plaintext.size + 20 + (blocksize - 1)
+    assert min_size <= ciphertext.size <= max_size
