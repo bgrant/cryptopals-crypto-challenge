@@ -370,15 +370,17 @@ def detect_encryption_mode(encryption_fn, blocksize=16, force_mode=None):
     blocksize = 16
     nblocks = 10
     plaintext = np.zeros(nblocks*blocksize, dtype=np.uint8)
-    ciphertext = encryption_fn(plaintext, blocksize=blocksize,
-                               force_mode=force_mode)
+    if force_mode is not None:
+        ciphertext = encryption_fn(plaintext, blocksize=blocksize,
+                                   force_mode=force_mode)
+    else:
+        ciphertext = encryption_fn(plaintext, blocksize=blocksize)
 
     # count occurrences of each byte value
     _, counts = np.unique(ciphertext, return_counts=True)
 
     # see if there are at least `nblocks` repetitions of `blocksize` blocks
     top_count = counts.max()
-
     if top_count >= nblocks:
         return 'ECB'
     else:
@@ -392,20 +394,70 @@ def random_ecb_encrypter(plaintext, blocksize=16,
     Encrypt data using a consistent random key, with random padding, in ECB
     mode.
 
-    AES-128-ECB(padding || your-string || unknown-string || padding,
-                random-key)
+    AES-128-ECB(plaintext || unknown-plaintext, random-key)
     """
     unknown_plaintext = afb64(
             b"Um9sbGluJyBpbiBteSA1LjAKV2l0aCBteSByYWctdG9wIGRvd2"
             b"4gc28gbXkgaGFpciBjYW4gYmxvdwpUaGUgZ2lybGllcyBvbiBz"
             b"dGFuZGJ5IHdhdmluZyBqdXN0IHRvIHNheSBoaQpEaWQgeW91IH"
             b"N0b3A/IE5vLCBJIGp1c3QgZHJvdmUgYnkK")
-    plaintext = np.hstack((unknown_plaintext, plaintext))
-    left_pad, right_pad = np.random.randint(5, 11, 2)
-    padded = np.pad(plaintext, (left_pad, right_pad), mode='constant')
-    cipher = encrypt_aes_ecb(pkcs7(padded, blocksize=blocksize),
+    cat_text = np.hstack((plaintext, unknown_plaintext))
+    cipher = encrypt_aes_ecb(pkcs7(cat_text, blocksize=blocksize),
                              key=key, blocksize=blocksize)
     return cipher
+
+
+def detect_ecb_blocksize(encryption_fn):
+    """Return the blocksize used by encryption_fn."""
+    # encrypt with known plaintext
+    nbytes = 2**10
+    plain = np.zeros(nbytes, dtype=np.uint8)
+    cipher = encryption_fn(plain)
+    _, counts = np.unique(cipher, return_counts=True)
+    candidates = counts[counts > counts.mean()]
+    return int(candidates.sum() / candidates.min())
+
+
+def _decrypt_byte(encryption_fn, plaintext, decrypted, blocksize=16):
+    """Given a function that encrypts cat(known_plaintext, unknown_plaintext)
+    If blocksize == 8:
+        encrypt(0000000?) -> target_cipher
+        encrypt(0000000[0-255]), and figure out which matches target_cipher
+        if 00000009 matches, 9 is the first char of unknown_plaintext
+    """
+    target_cipher = encryption_fn(plaintext)[:blocksize]
+    plain = np.hstack((plaintext, decrypted))
+    plain = np.tile(plain, (2**8, 1))
+    last_byte = np.arange(2**8, dtype=np.uint8).reshape(-1, 1)
+    data = np.hstack((plain, last_byte))
+    cipher = np.apply_along_axis(encryption_fn, axis=1, arr=data)
+    cipher = cipher[:, :blocksize]  # look at first block only
+    return np.where(np.all(cipher == target_cipher, axis=1))[0][0]
+
+
+def simple_byte_at_a_time_decryption(encryption_fn):
+    blocksize = detect_ecb_blocksize(encryption_fn)
+    assert detect_encryption_mode(encryption_fn) == 'ECB'
+    decrypted = []
+    for bs in reversed(range(blocksize)):
+        plaintext = np.full(bs, 0x40, dtype=np.uint8)
+        last_byte = _decrypt_byte(encryption_fn, plaintext,
+                                  np.array(decrypted, dtype=np.uint8),
+                                  blocksize=blocksize)
+        decrypted.append(last_byte)
+    return np.array(decrypted, dtype=np.uint8)
+
+
+def _find_data_start(cipher, blocksize):
+    start = 0
+    while True:
+        window0 = slice(start, start+blocksize)
+        window1 = slice(start+blocksize, start+2*blocksize)
+        print(cipher[window0] == cipher[window1])
+        if all(cipher[window0] == cipher[window1]):
+            return start
+        else:
+            start += 1
 
 
 # # # Tests for Crypto # # #
@@ -520,7 +572,38 @@ def test_random_ecb_encrypter():
     plaintext = afb(b"I was raised by a cup of coffee")
     blocksize = 16
     ciphertext = random_ecb_encrypter(plaintext, blocksize=blocksize)
-    unknown_text_size = 184
-    min_size = plaintext.size + 10
-    max_size = unknown_text_size + plaintext.size + 20 + (blocksize - 1)
+    unknown_text_size = 138
+    min_size = plaintext.size + unknown_text_size
+    max_size = min_size + blocksize
     assert min_size <= ciphertext.size <= max_size
+
+
+def test_detect_ecb_blocksize():
+    encrypter = random_ecb_encrypter
+    assert detect_ecb_blocksize(encrypter) == 16
+
+
+def test__decrypt_byte():
+    def _test_encrypter(plaintext, blocksize=16,
+                        key=np.zeros(16, dtype=np.uint8)):
+        unknown_plaintext = afb(b"I was raised by a cup of coffee!")
+        cat_text = np.hstack((plaintext, unknown_plaintext))
+        cipher = encrypt_aes_ecb(pkcs7(cat_text, blocksize=blocksize),
+                                 key=key, blocksize=blocksize)
+        return cipher
+    byte = _decrypt_byte(_test_encrypter,
+                         np.zeros(15, dtype=np.uint8),
+                         decrypted=np.array([], np.uint8),
+                         blocksize=16)
+    assert byte == afb(b"I")[0]
+
+
+def test_simple_byte_at_a_time_decryption():
+    def _test_encrypter(plaintext, blocksize=16,
+                        key=np.zeros(16, dtype=np.uint8)):
+        unknown_plaintext = afb(b"I was raised by a cup of coffee!")
+        cat_text = np.hstack((plaintext, unknown_plaintext))
+        cipher = encrypt_aes_ecb(pkcs7(cat_text, blocksize=blocksize),
+                                 key=key, blocksize=blocksize)
+        return cipher
+    return bfa(simple_byte_at_a_time_decryption(_test_encrypter))
