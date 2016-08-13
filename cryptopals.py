@@ -418,34 +418,56 @@ def detect_ecb_blocksize(encryption_fn):
     return int(candidates.sum() / candidates.min())
 
 
-def _decrypt_byte(encryption_fn, plaintext, decrypted, blocksize=16):
+def _decrypt_byte(encryption_fn, plaintext, decrypted, blocksize=16, offset=0):
     """Given a function that encrypts cat(known_plaintext, unknown_plaintext)
     If blocksize == 8:
         encrypt(0000000?) -> target_cipher
         encrypt(0000000[0-255]), and figure out which matches target_cipher
-        if 00000009 matches, 9 is the first char of unknown_plaintext
+        if 0000000A matches, A is the first char of unknown_plaintext
     """
-    target_cipher = encryption_fn(plaintext)[:blocksize]
+    target_block = slice(offset, offset+blocksize)
+    target_cipher = encryption_fn(plaintext)[target_block]
     plain = np.hstack((plaintext, decrypted))
     plain = np.tile(plain, (2**8, 1))
+    # add all possible last-byte values to the end
     last_byte = np.arange(2**8, dtype=np.uint8).reshape(-1, 1)
     data = np.hstack((plain, last_byte))
     cipher = np.apply_along_axis(encryption_fn, axis=1, arr=data)
-    cipher = cipher[:, :blocksize]  # look at first block only
+    cipher = cipher[:, target_block]  # look at target block only
     return np.where(np.all(cipher == target_cipher, axis=1))[0][0]
 
 
-def simple_byte_at_a_time_decryption(encryption_fn):
+def _decrypt_block(encryption_fn, blocksize, decrypted=None):
+    if decrypted is None:
+        decrypted = np.array([], np.uint8)
+    offset = decrypted.size
+    for bs in reversed(range(blocksize)):
+        plaintext = np.zeros(bs, dtype=np.uint8)
+        try:
+            last_byte = _decrypt_byte(encryption_fn, plaintext, decrypted,
+                                      blocksize=blocksize, offset=offset)
+            decrypted = np.append(decrypted, np.array(last_byte, np.uint8))
+        except IndexError:
+            # append a special end marker
+            return np.append(decrypted, np.array([0xff], dtype=np.uint8))
+    return decrypted
+
+
+def _decrypt_unknown_plaintext(encryption_fn, blocksize):
+    decrypted = np.array([], dtype=np.uint8)
+    while True:
+        decrypted = _decrypt_block(encryption_fn, blocksize=blocksize,
+                                   decrypted=decrypted)
+        if decrypted[-1] == 0xff:  # special end marker
+            break
+    return decrypted[:-1]
+
+
+def byte_at_a_time_ecb_decryption(encryption_fn):
+    """Set 2 - Challenge 12"""
     blocksize = detect_ecb_blocksize(encryption_fn)
     assert detect_encryption_mode(encryption_fn) == 'ECB'
-    decrypted = []
-    for bs in reversed(range(blocksize)):
-        plaintext = np.full(bs, 0x40, dtype=np.uint8)
-        last_byte = _decrypt_byte(encryption_fn, plaintext,
-                                  np.array(decrypted, dtype=np.uint8),
-                                  blocksize=blocksize)
-        decrypted.append(last_byte)
-    return np.array(decrypted, dtype=np.uint8)
+    return _decrypt_unknown_plaintext(encryption_fn, blocksize=blocksize)
 
 
 def _find_data_start(cipher, blocksize):
@@ -598,7 +620,7 @@ def test__decrypt_byte():
     assert byte == afb(b"I")[0]
 
 
-def test_simple_byte_at_a_time_decryption():
+def test__decrypt_block():
     def _test_encrypter(plaintext, blocksize=16,
                         key=np.zeros(16, dtype=np.uint8)):
         unknown_plaintext = afb(b"I was raised by a cup of coffee!")
@@ -606,4 +628,4 @@ def test_simple_byte_at_a_time_decryption():
         cipher = encrypt_aes_ecb(pkcs7(cat_text, blocksize=blocksize),
                                  key=key, blocksize=blocksize)
         return cipher
-    return bfa(simple_byte_at_a_time_decryption(_test_encrypter))
+    return bfa(_decrypt_block(_test_encrypter, blocksize=16))
