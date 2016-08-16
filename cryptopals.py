@@ -429,38 +429,42 @@ def _decrypt_byte(encryption_fn, plaintext, decrypted, blocksize=16, offset=0):
     target_cipher = encryption_fn(plaintext)[target_block]
     plain = np.hstack((plaintext, decrypted))
     plain = np.tile(plain, (2**8, 1))
-    # add all possible last-byte values to the end
+    # Add all possible last-byte values to the end.
+    # I could improve speed by only trying printable characters, if necessary.
     last_byte = np.arange(2**8, dtype=np.uint8).reshape(-1, 1)
-    data = np.hstack((plain, last_byte))
-    cipher = np.apply_along_axis(encryption_fn, axis=1, arr=data)
+    possibilities = np.hstack((plain, last_byte))
+    cipher = np.apply_along_axis(encryption_fn, axis=1, arr=possibilities)
     cipher = cipher[:, target_block]  # look at target block only
     return np.where(np.all(cipher == target_cipher, axis=1))[0][0]
 
 
 def _decrypt_block(encryption_fn, blocksize, decrypted=None):
+    """Returns (decrypted_block', {'stop'|'continue'})
+
+    'continue' is returned as the last element unless the 0x01 padding byte is
+    encountered.  Then, 'stop' is returned.
+    """
     if decrypted is None:
         decrypted = np.array([], np.uint8)
     offset = decrypted.size
     for bs in reversed(range(blocksize)):
         plaintext = np.zeros(bs, dtype=np.uint8)
-        try:
-            last_byte = _decrypt_byte(encryption_fn, plaintext, decrypted,
-                                      blocksize=blocksize, offset=offset)
+        last_byte = _decrypt_byte(encryption_fn, plaintext, decrypted,
+                                  blocksize=blocksize, offset=offset)
+        if last_byte == 0x01:  # it's padding; stop
+            return decrypted, 'stop'
+        else:
             decrypted = np.append(decrypted, np.array(last_byte, np.uint8))
-        except IndexError:
-            # append a special end marker
-            return np.append(decrypted, np.array([0xff], dtype=np.uint8))
-    return decrypted
+    return decrypted, 'continue'
 
 
 def _decrypt_unknown_plaintext(encryption_fn, blocksize):
     decrypted = np.array([], dtype=np.uint8)
-    while True:
-        decrypted = _decrypt_block(encryption_fn, blocksize=blocksize,
-                                   decrypted=decrypted)
-        if decrypted[-1] == 0xff:  # special end marker
-            break
-    return decrypted[:-1]
+    status = 'continue'
+    while status == 'continue':
+        decrypted, status = _decrypt_block(encryption_fn, blocksize=blocksize,
+                                           decrypted=decrypted)
+    return decrypted
 
 
 def byte_at_a_time_ecb_decryption(encryption_fn):
@@ -617,15 +621,29 @@ def test__decrypt_byte():
                          np.zeros(15, dtype=np.uint8),
                          decrypted=np.array([], np.uint8),
                          blocksize=16)
-    assert byte == afb(b"I")[0]
+    assert byte == ord(b"I")
 
 
 def test__decrypt_block():
+    unknown_plaintext = afb(b"YELLOW SUBMARINE")
     def _test_encrypter(plaintext, blocksize=16,
                         key=np.zeros(16, dtype=np.uint8)):
-        unknown_plaintext = afb(b"I was raised by a cup of coffee!")
         cat_text = np.hstack((plaintext, unknown_plaintext))
         cipher = encrypt_aes_ecb(pkcs7(cat_text, blocksize=blocksize),
                                  key=key, blocksize=blocksize)
         return cipher
-    return bfa(_decrypt_block(_test_encrypter, blocksize=16))
+    result, status = _decrypt_block(_test_encrypter, blocksize=16)
+    assert np.all(result == unknown_plaintext)
+    assert status == 'continue'
+
+
+def test_byte_at_a_time_ecb_decryption():
+    unknown_plaintext = afb(b"I was raised by a cup of coffee!")
+    def _test_encrypter(plaintext, blocksize=16,
+                        key=np.zeros(16, dtype=np.uint8)):
+        cat_text = np.hstack((plaintext, unknown_plaintext))
+        cipher = encrypt_aes_ecb(pkcs7(cat_text, blocksize=blocksize),
+                                 key=key, blocksize=blocksize)
+        return cipher
+    result = byte_at_a_time_ecb_decryption(_test_encrypter)
+    assert bfa(result) == bfa(unknown_plaintext)
