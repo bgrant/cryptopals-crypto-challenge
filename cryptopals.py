@@ -203,14 +203,11 @@ def find_likely_keysizes(data):
 
 def _decrypt_repeating_key_xor(data):
     keysizes = find_likely_keysizes(data)
-    for keysize in keysizes:
-        pad_remainder = len(data) % keysize[0]
-        pad_len = keysize[0] - pad_remainder
-        padded_data = np.pad(data, (0, pad_len), mode='constant')
-        padded_data.shape = (-1, keysize[0])
-        decrypted = np.empty_like(padded_data)
-        for col in range(padded_data.shape[1]):
-            decrypted[:, col] = decrypt_single_byte_xor(padded_data[:, col])[0]
+    for keysize, _ in keysizes:
+        pad_len, padded_data = pkcs7(data, keysize, return_len=True)
+        padded_data.shape = (-1, keysize)
+        decrypted = np.apply_along_axis(decrypt_single_byte_xor, axis=0,
+                                        arr=padded_data)
         decrypted.shape = (-1,)
         if pad_len > 0:
             decrypted = decrypted[:-pad_len]
@@ -223,12 +220,13 @@ def decrypt_repeating_key_xor(data):
     return next(candidates)
 
 
-def decrypt_aes_ecb(data, key=afb(b'YELLOW SUBMARINE'), blocksize=16):
+def decrypt_aes_ecb(ciphertext, key=afb(b'YELLOW SUBMARINE'), blocksize=16):
     """Set 1 - Challenge 7"""
-    data = pkcs7(data, blocksize)
-    key = pkcs7(key, blocksize)
-    decrypter = AES.new(key, AES.MODE_ECB)
-    return np.frombuffer(decrypter.decrypt(data), dtype=np.uint8)
+    padded_cipher = pkcs7(ciphertext, blocksize)
+    padded_key = pkcs7(key, blocksize)
+    decrypter = AES.new(padded_key, AES.MODE_ECB)
+    plaintext = afb(decrypter.decrypt(padded_cipher))
+    return plaintext
 
 
 def detect_aes_ecb(data, blocksize=16):
@@ -263,6 +261,18 @@ def pkcs7(data, blocksize=16, return_len=False):
         return padded_data
 
 
+def strip_pkcs7(plaintext, blocksize):
+    try:
+        last_val = plaintext[-1]
+    except IndexError:
+        return plaintext
+
+    if last_val < blocksize:
+        return plaintext[:-int(last_val)]
+    else:
+        return plaintext
+
+
 def encrypt_aes_ecb(data, key, blocksize=16):
     """Set 2 - Challenge 10"""
     data = pkcs7(data, blocksize)
@@ -295,7 +305,7 @@ def decrypt_aes_cbc_serial(ciphertext, key, iv, blocksize=16):
         else:
             plain[i] = decrypt_aes_ecb(cipher[i], key=key) ^ cipher[i-1]
     plain.shape = (-1,)
-    return plain
+    return strip_pkcs7(plain, blocksize=blocksize)
 
 
 def decrypt_aes_cbc(ciphertext, key, iv, blocksize=16):
@@ -305,16 +315,13 @@ def decrypt_aes_cbc(ciphertext, key, iv, blocksize=16):
     """
     # decrypt
     cipher = pkcs7(ciphertext, blocksize=blocksize)
-    plain = afb(decrypt_aes_ecb(cipher, key=key, blocksize=blocksize))
+    plain = afb(decrypt_aes_ecb(ciphertext, key=key, blocksize=blocksize))
 
     # XOR plaintext blocks with previous ciphertext blocks
     # (iv for 0th block)
-    cipher.shape = (-1, blocksize)
-    plain.shape = (-1, blocksize)
-    plain = plain ^ np.vstack((iv, cipher[:-1]))
+    plain = plain ^ np.hstack((iv, cipher[:-1]))[:plain.size]
 
-    plain.shape = (-1,)
-    return plain
+    return strip_pkcs7(plain, blocksize=blocksize)
 
 
 def random_aes_key(blocksize=16):
@@ -343,11 +350,11 @@ def encryption_oracle(plaintext, blocksize=16, force_mode=None):
         mode = np.random.choice(encryption_modes)
 
     if mode == 'ECB':
-        cipher = encrypt_aes_ecb(pkcs7(padded, blocksize=blocksize),
+        cipher = encrypt_aes_ecb(padded,
                                  key=key,
                                  blocksize=blocksize)
     elif mode == 'CBC':
-        cipher = encrypt_aes_cbc(pkcs7(padded, blocksize=blocksize),
+        cipher = encrypt_aes_cbc(padded,
                                  key=key,
                                  iv=random_aes_key(blocksize=blocksize),
                                  blocksize=blocksize)
@@ -391,8 +398,7 @@ def random_ecb_encrypter(plaintext, blocksize=16,
                          key=random_aes_key(blocksize=16)):
     """Set 2 - Challenge 12
 
-    Encrypt data using a consistent random key, with random padding, in ECB
-    mode.
+    Encrypt data using a consistent random key.
 
     AES-128-ECB(plaintext || unknown-plaintext, random-key)
     """
@@ -402,8 +408,7 @@ def random_ecb_encrypter(plaintext, blocksize=16,
             b"dGFuZGJ5IHdhdmluZyBqdXN0IHRvIHNheSBoaQpEaWQgeW91IH"
             b"N0b3A/IE5vLCBJIGp1c3QgZHJvdmUgYnkK")
     cat_text = np.hstack((plaintext, unknown_plaintext))
-    cipher = encrypt_aes_ecb(pkcs7(cat_text, blocksize=blocksize),
-                             key=key, blocksize=blocksize)
+    cipher = encrypt_aes_ecb(cat_text, key=key, blocksize=blocksize)
     return cipher
 
 
@@ -474,6 +479,50 @@ def byte_at_a_time_ecb_decryption(encryption_fn):
     return _decrypt_unknown_plaintext(encryption_fn, blocksize=blocksize)
 
 
+def parse_kv_string(kv_string):
+    """Set 2 - Challenge 13
+
+    Given a string like "foo=bar&baz=qux&zap=zazzle" parse it and return a
+    dictionary.
+    """
+    pairs = (substr.split(b'=') for substr in kv_string.split(b'&'))
+    return dict(pairs)
+
+
+def encode_kv_string(dct):
+    """Set 2 - Challenge 13"""
+    pairs = sorted(dct.items())
+    return b'&'.join(b'='.join(pair) for pair in pairs)
+
+
+uids = itertools.count()
+
+
+def profile_for(email_addr):
+    """Set 2 - Challenge 13"""
+    clean_addr = email_addr.replace(b'&', b'').replace(b'=', b'')
+    profile = {
+            b'email': clean_addr,
+            b'uid': str(next(uids)).encode(),
+            b'role': b'user',
+            }
+    return encode_kv_string(profile)
+
+
+def encrypted_profile_for(email_addr, key, blocksize=16):
+    profile = profile_for(email_addr)
+    cipher_profile = encrypt_aes_ecb(afb(profile), key=key,
+                                     blocksize=blocksize)
+    return cipher_profile
+
+
+def create_admin_profile():
+    """Set 2 - Challenge 13"""
+    key = random_aes_key(blocksize=16)
+    cipher_profile = encrypted_profile_for()
+    return cipher_profile
+
+
 def _find_data_start(cipher, blocksize):
     start = 0
     while True:
@@ -540,12 +589,24 @@ def test_pkcs7():
     assert bfa(pkcs7(data, 15)) == b"BLUE SUBMARINE\x01"
 
 
+def test_decrypt_repeating_key_xor():
+    with open("./6.txt") as fh:
+        data = fh.read().strip().replace('\n', '').encode()
+    ciphertext = afb64(data)
+    plaintext = decrypt_repeating_key_xor(ciphertext)
+    result = bfa(plaintext)
+    lines = result.splitlines()
+    assert lines[0].strip() == b"I'm back and I'm ringin' the bell"
+    assert lines[-1].strip() == b"Play that funky music"
+
+
 def test_encrypt_aes_ecb():
-    data = afb(b'MORE PYTHONS')
+    plain = afb(b'MORE PYTHONS')
     key = afb(b'YELLOW SUBMARINE')
-    encrypted = encrypt_aes_ecb(data, key=key)
-    decrypted = decrypt_aes_ecb(encrypted, key=key)
-    assert np.all(pkcs7(data, 16) == decrypted)
+    blocksize = 16
+    cipher = encrypt_aes_ecb(plain, key=key, blocksize=blocksize)
+    result = decrypt_aes_ecb(cipher, key=key, blocksize=blocksize)
+    assert np.all(strip_pkcs7(result, blocksize=blocksize) == plain)
 
 
 def test_decrypt_aes_cbc():
@@ -558,7 +619,16 @@ def test_decrypt_aes_cbc():
     print(bfa(plaintext))
 
 
-def test_aes_cbc_round_trip():
+def test_aes_cbc_round_trip_serial():
+    key = afb(b"YELLOW SUBMARINE")
+    iv = np.zeros(16, dtype=np.uint8)
+    plaintext = afb(b"I was raised by a cup of coffee!")
+    ciphertext = encrypt_aes_cbc(plaintext, key, iv)
+    result = decrypt_aes_cbc_serial(ciphertext, key, iv)
+    assert np.all(plaintext == result)
+
+
+def test_aes_cbc_round_trip_parallel():
     key = afb(b"YELLOW SUBMARINE")
     iv = np.zeros(16, dtype=np.uint8)
     plaintext = afb(b"I was raised by a cup of coffee!")
@@ -624,7 +694,7 @@ def test__decrypt_byte():
     assert byte == ord(b"I")
 
 
-def test__decrypt_block():
+def test__decrypt_block_continue():
     unknown_plaintext = afb(b"YELLOW SUBMARINE")
     def _test_encrypter(plaintext, blocksize=16,
                         key=np.zeros(16, dtype=np.uint8)):
@@ -637,6 +707,19 @@ def test__decrypt_block():
     assert status == 'continue'
 
 
+def test__decrypt_block_stop():
+    unknown_plaintext = afb(b"YELLOW")
+    def _test_encrypter(plaintext, blocksize=16,
+                        key=np.zeros(16, dtype=np.uint8)):
+        cat_text = np.hstack((plaintext, unknown_plaintext))
+        cipher = encrypt_aes_ecb(pkcs7(cat_text, blocksize=blocksize),
+                                 key=key, blocksize=blocksize)
+        return cipher
+    result, status = _decrypt_block(_test_encrypter, blocksize=16)
+    assert np.all(result == unknown_plaintext)
+    assert status == 'stop'
+
+
 def test_byte_at_a_time_ecb_decryption():
     unknown_plaintext = afb(b"I was raised by a cup of coffee!")
     def _test_encrypter(plaintext, blocksize=16,
@@ -647,3 +730,52 @@ def test_byte_at_a_time_ecb_decryption():
         return cipher
     result = byte_at_a_time_ecb_decryption(_test_encrypter)
     assert bfa(result) == bfa(unknown_plaintext)
+
+
+def test_parse_kv_string():
+    kv_string = b"foo=bar&baz=qux&zap=zazzle"
+    expected = {
+            b'foo': b'bar',
+            b'baz': b'qux',
+            b'zap': b'zazzle'
+            }
+    kv_dict = parse_kv_string(kv_string)
+    assert kv_dict == expected
+
+
+def test_encode_kv_string():
+    kv_string = b"foo=bar&baz=qux&zap=zazzle"
+    expected = {
+            b'foo': b'bar',
+            b'baz': b'qux',
+            b'zap': b'zazzle'
+            }
+    kv_dict = parse_kv_string(kv_string)
+    assert kv_dict == expected
+
+
+def test_profile_for():
+    addr = b'foo@bar.com'
+    profile_str = profile_for(addr)
+    profile = parse_kv_string(profile_str)
+    assert profile[b'role'] == b'user'
+    assert profile[b'email'] == addr
+    assert isinstance(int(profile[b'uid']), int)
+
+
+def test_profile_for_cleaned():
+    addr = b'foo@bar.com&role=admin'
+    clean_addr = b'foo@bar.comroleadmin'
+    profile_str = profile_for(addr)
+    profile = parse_kv_string(profile_str)
+    assert profile[b'role'] == b'user'
+    assert profile[b'email'] == clean_addr
+    assert isinstance(int(profile[b'uid']), int)
+
+
+def test_encrypt_decrypt_profile_for():
+    addr = b'foo@bar.com'
+    key = random_aes_key()
+    ciphertext = encrypted_profile_for(addr, key=key)
+    plaintext = decrypt_aes_ecb(ciphertext, key=key)
+    return bfa(plaintext)
