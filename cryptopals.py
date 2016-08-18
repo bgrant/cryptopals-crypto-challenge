@@ -839,3 +839,8 @@ def test_encrypt_decrypt_profile_for():
     assert profile[b'role'] == b'user'
     assert profile[b'email'] == addr
     assert isinstance(int(profile[b'uid']), int)
+
+
+def test_create_admin_profile():
+    profile = create_admin_profile()
+    assert profile[b'role'] == b'admin'
