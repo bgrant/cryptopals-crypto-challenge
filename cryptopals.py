@@ -13,7 +13,7 @@ from base64 import b16decode
 
 import itertools
 from functools import partial
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 
 import numpy as np
 from Crypto.Cipher import AES
@@ -374,14 +374,16 @@ def detect_encryption_mode(encryption_fn, blocksize=16, force_mode=None):
     for testing.
     """
     # encrypt with known plaintext
-    blocksize = 16
     nblocks = 10
     plaintext = np.zeros(nblocks*blocksize, dtype=np.uint8)
-    if force_mode is not None:
-        ciphertext = encryption_fn(plaintext, blocksize=blocksize,
-                                   force_mode=force_mode)
-    else:
-        ciphertext = encryption_fn(plaintext, blocksize=blocksize)
+    try:
+        if force_mode is not None:
+            ciphertext = encryption_fn(plaintext, blocksize=blocksize,
+                                       force_mode=force_mode)
+        else:
+            ciphertext = encryption_fn(plaintext, blocksize=blocksize)
+    except TypeError:  # encryption_fn doesn't accept a blocksize
+        ciphertext = encryption_fn(plaintext)
 
     # count occurrences of each byte value
     _, counts = np.unique(ciphertext, return_counts=True)
@@ -473,7 +475,11 @@ def _decrypt_unknown_plaintext(encryption_fn, blocksize):
 
 
 def byte_at_a_time_ecb_decryption(encryption_fn):
-    """Set 2 - Challenge 12"""
+    """Set 2 - Challenge 12
+
+    Given a function that encrypts cat(known_plaintext, unknown_plaintext),
+    decrypt unknown_plaintext.
+    """
     blocksize = detect_ecb_blocksize(encryption_fn)
     assert detect_encryption_mode(encryption_fn) == 'ECB'
     return _decrypt_unknown_plaintext(encryption_fn, blocksize=blocksize)
@@ -484,43 +490,96 @@ def parse_kv_string(kv_string):
 
     Given a string like "foo=bar&baz=qux&zap=zazzle" parse it and return a
     dictionary.
+
+    `kv_string` can be an array or a byte string.
     """
-    pairs = (substr.split(b'=') for substr in kv_string.split(b'&'))
-    return dict(pairs)
+    if isinstance(kv_string, np.ndarray):
+        kv_string = bfa(kv_string)
+    dct = {}
+    for substr in kv_string.split(b'&'):
+        key, val = substr.split(b'=')
+        dct[key.strip()] = val.strip()
+    return dct
 
 
 def encode_kv_string(dct):
     """Set 2 - Challenge 13"""
-    pairs = sorted(dct.items())
-    return b'&'.join(b'='.join(pair) for pair in pairs)
+    s = b'&'.join(b'='.join(pair) for pair in dct.items())
+    return afb(s)
 
 
 uids = itertools.count()
 
 
 def profile_for(email_addr):
-    """Set 2 - Challenge 13"""
+    """Set 2 - Challenge 13
+
+    Takes a numpy array or a byte string.
+    """
+    if isinstance(email_addr, np.ndarray):
+        email_addr = bfa(email_addr)
     clean_addr = email_addr.replace(b'&', b'').replace(b'=', b'')
-    profile = {
-            b'email': clean_addr,
-            b'uid': str(next(uids)).encode(),
-            b'role': b'user',
-            }
+    profile = OrderedDict((
+            (b'email', clean_addr),
+            (b'uid', str(next(uids)).encode()),
+            (b'role', b'user'),
+            ))
     return encode_kv_string(profile)
 
 
-def encrypted_profile_for(email_addr, key, blocksize=16):
+PROFILE_BLOCKSIZE = 16
+PROFILE_KEY = random_aes_key(blocksize=PROFILE_BLOCKSIZE)
+
+
+def encrypted_profile_for(email_addr):
     profile = profile_for(email_addr)
-    cipher_profile = encrypt_aes_ecb(afb(profile), key=key,
-                                     blocksize=blocksize)
+    cipher_profile = encrypt_aes_ecb(profile, key=PROFILE_KEY,
+                                     blocksize=PROFILE_BLOCKSIZE)
     return cipher_profile
+
+
+def decrypted_profile_from(cipher_profile):
+    plain_profile = decrypt_aes_ecb(cipher_profile, key=PROFILE_KEY,
+                                    blocksize=PROFILE_BLOCKSIZE)
+    unpadded = strip_pkcs7(plain_profile, blocksize=PROFILE_BLOCKSIZE)
+    return parse_kv_string(bfa(unpadded))
 
 
 def create_admin_profile():
-    """Set 2 - Challenge 13"""
-    key = random_aes_key(blocksize=16)
-    cipher_profile = encrypted_profile_for()
-    return cipher_profile
+    """Set 2 - Challenge 13
+
+    Challenge: create an admin profile
+
+    Strategy:
+    1. We know that a plaintext profile looks like:
+        b'email=foo@bar.com&uid=2&role=user'
+    2. We can't make `encrypted_profile_for` give us a `role=admin` profile
+    3. We *can* construct some malicious block-aligned profiles to get the
+       blocks we want by manipulating the input email address:
+               block 0         block 1         block 2         block 3
+          |---16-bytes---||---16-bytes---||---16-bytes---||---16-bytes---|
+        b'email=ab@bar.comadmin               &uid=2&role=user'
+
+    4. Taking the generated ciphertext from the above, we can rearrange the
+       ciphertext blocks to be:
+               block 0         block 2         block 1
+          |---16-bytes---||---16-bytes---||---16-bytes---|
+        b'email=ab@bar.com    &uid=2&role=admin'
+
+    5. After decrypting the above ciphertext, it should yield this profile:
+        {b'email': b'ab@bar.com    ',
+         b'role': b'admin           ',
+         b'uid': b'2'}
+    """
+    blocksize = detect_ecb_blocksize(encrypted_profile_for)
+    assert detect_encryption_mode(encrypted_profile_for) == 'ECB'
+
+    malicious = afb(b'ab@bar.comadmin               ')
+    cipher_profile = encrypted_profile_for(malicious)
+    crafted_cipher = cipher_profile.reshape(-1, blocksize)
+    crafted_cipher = crafted_cipher[(0, 2, 1), :].reshape(-1)
+    plain_profile = decrypted_profile_from(crafted_cipher)
+    return plain_profile
 
 
 def _find_data_start(cipher, blocksize):
@@ -756,7 +815,7 @@ def test_encode_kv_string():
 
 def test_profile_for():
     addr = b'foo@bar.com'
-    profile_str = profile_for(addr)
+    profile_str = profile_for(afb(addr))
     profile = parse_kv_string(profile_str)
     assert profile[b'role'] == b'user'
     assert profile[b'email'] == addr
@@ -775,7 +834,8 @@ def test_profile_for_cleaned():
 
 def test_encrypt_decrypt_profile_for():
     addr = b'foo@bar.com'
-    key = random_aes_key()
-    ciphertext = encrypted_profile_for(addr, key=key)
-    plaintext = decrypt_aes_ecb(ciphertext, key=key)
-    return bfa(plaintext)
+    ciphertext = encrypted_profile_for(addr)
+    profile = decrypted_profile_from(ciphertext)
+    assert profile[b'role'] == b'user'
+    assert profile[b'email'] == addr
+    assert isinstance(int(profile[b'uid']), int)
