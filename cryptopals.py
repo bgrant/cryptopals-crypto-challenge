@@ -261,18 +261,6 @@ def pkcs7(data, blocksize=16, return_len=False):
         return padded_data
 
 
-def strip_pkcs7(plaintext, blocksize):
-    try:
-        last_val = plaintext[-1]
-    except IndexError:
-        return plaintext
-
-    if last_val < blocksize:
-        return plaintext[:-int(last_val)]
-    else:
-        return plaintext
-
-
 def encrypt_aes_ecb(data, key, blocksize=16):
     """Set 2 - Challenge 10"""
     data = pkcs7(data, blocksize)
@@ -582,6 +570,32 @@ def create_admin_profile():
     return plain_profile
 
 
+def strip_pkcs7(plaintext, blocksize):
+    """Set 2 - Challenge 15
+
+    Raises an exception when it finds bad padding.  Otherwise, returns only the
+    data portion of plaintext.
+    """
+    try:
+        # cast np.uint8 to regular int, so we can work with it below
+        pad_len = int(plaintext[-1])
+    except IndexError:
+        return plaintext
+
+    # Check if the last byte is a value less than `blocksize`.  If it's
+    # greater, assume there is no padding and that the last byte is part of the
+    # data.
+    if pad_len < blocksize:
+        data = plaintext[:-pad_len]
+        pad = plaintext[-pad_len:]
+        if np.all(pad == pad_len):  # valid padding
+            return data
+        else:
+            raise ValueError("Invalid pkcs7 padding.")
+    else:
+        return plaintext
+
+
 def _find_data_start(cipher, blocksize):
     start = 0
     while True:
@@ -844,3 +858,37 @@ def test_encrypt_decrypt_profile_for():
 def test_create_admin_profile():
     profile = create_admin_profile()
     assert profile[b'role'] == b'admin'
+
+
+def test_pkcs7_round_trip():
+    blocksize = 16
+    plaintext = afb(b"Hello!")
+    padded = pkcs7(plaintext, blocksize=blocksize)
+    assert not np.all(padded == plaintext)
+    result = strip_pkcs7(plaintext, blocksize=blocksize)
+    assert np.all(result == plaintext)
+
+
+def test_pkcs7_good():
+    blocksize = 16
+
+    padded = afb(b"ICE ICE BABY\x04\x04\x04\x04")
+    result = strip_pkcs7(padded, blocksize=blocksize)
+    expected = afb(b"ICE ICE BABY")
+    assert np.all(result == expected)
+
+    padded = afb(b"YELLOW SUBMARINE")
+    result = strip_pkcs7(padded, blocksize=blocksize)
+    assert np.all(result == padded)
+
+
+def test_strip_pkcs7_bad():
+    blocksize = 16
+
+    padded = afb(b"ICE ICE BABY\x05\x05\x05\x05")
+    with pytest.raises(ValueError):
+        strip_pkcs7(padded, blocksize=blocksize)
+
+    padded = afb(b"ICE ICE BABY\x01\x02\x03\x04")
+    with pytest.raises(ValueError):
+        strip_pkcs7(padded, blocksize=blocksize)
