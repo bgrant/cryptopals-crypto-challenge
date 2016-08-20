@@ -555,8 +555,8 @@ def create_admin_profile():
         b'email=ab@bar.com    &uid=2&role=admin'
 
     5. After decrypting the above ciphertext, it should yield this profile:
-        {b'email': b'ab@bar.com    ',
-         b'role': b'admin           ',
+        {b'email': b'ab@bar.com',
+         b'role': b'admin',
          b'uid': b'2'}
     """
     blocksize = detect_ecb_blocksize(encrypted_profile_for)
