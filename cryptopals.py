@@ -476,7 +476,7 @@ def byte_at_a_time_ecb_decryption(encryption_fn):
 def parse_kv_string(kv_string):
     """Set 2 - Challenge 13
 
-    Given a string like "foo=bar&baz=qux&zap=zazzle" parse it and return a
+    Given a string like "foo=bar&baz=qux&zap=zazzle", parse it and return a
     dictionary.
 
     `kv_string` can be an array or a byte string.
