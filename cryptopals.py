@@ -383,21 +383,55 @@ def detect_encryption_mode(encryption_fn, blocksize=16, force_mode=None):
     else:
         return 'CBC'
 
+min_prefix_len = min_postfix_len = 5
+max_prefix_len = max_postfix_len = 10
+prefix_len = np.random.randint(min_prefix_len, max_prefix_len)
+_PREFIX = afb(np.random.bytes(prefix_len))
+postfix_len = np.random.randint(min_postfix_len, max_postfix_len)
+_POSTFIX = afb(np.random.bytes(postfix_len))
 
 def random_ecb_encrypter(plaintext, blocksize=16,
-                         key=random_aes_key(blocksize=16)):
+                         key=random_aes_key(blocksize=16),
+                         add_prefix=False, add_postfix=False,
+                         test_unknown=None):
     """Set 2 - Challenge 12
 
     Encrypt data using a consistent random key.
 
-    AES-128-ECB(plaintext || unknown-plaintext, random-key)
+    AES-128-ECB(prefix || plaintext || unknown-plaintext || postfix,
+                random-key)
+
+    Parameters
+    ----------
+    plaintext : array of uint8
+    blocksize : int
+    key : array of uint8, with key.size == `blocksize`
+    add_prefix : bool
+        If True, prepend random bytes
+    add_postfix : bool
+        If True, append random bytes
+    test_unknown : array of uint8
+        If provided, use this string as "unknown plaintext".  Otherwise, use a
+        secret string.
     """
-    unknown_plaintext = afb64(
-            b"Um9sbGluJyBpbiBteSA1LjAKV2l0aCBteSByYWctdG9wIGRvd2"
-            b"4gc28gbXkgaGFpciBjYW4gYmxvdwpUaGUgZ2lybGllcyBvbiBz"
-            b"dGFuZGJ5IHdhdmluZyBqdXN0IHRvIHNheSBoaQpEaWQgeW91IH"
-            b"N0b3A/IE5vLCBJIGp1c3QgZHJvdmUgYnkK")
-    cat_text = np.hstack((plaintext, unknown_plaintext))
+    prefix = afb(b"")
+    postfix = afb(b"")
+
+    if add_prefix:
+        prefix = _PREFIX
+    if add_postfix:
+        postfix = _POSTFIX
+
+    if test_unknown is None:
+        unknown_plaintext = afb64(
+                b"Um9sbGluJyBpbiBteSA1LjAKV2l0aCBteSByYWctdG9wIGRvd2"
+                b"4gc28gbXkgaGFpciBjYW4gYmxvdwpUaGUgZ2lybGllcyBvbiBz"
+                b"dGFuZGJ5IHdhdmluZyBqdXN0IHRvIHNheSBoaQpEaWQgeW91IH"
+                b"N0b3A/IE5vLCBJIGp1c3QgZHJvdmUgYnkK")
+    else:
+        unknown_plaintext = test_unknown
+
+    cat_text = np.hstack((prefix, plaintext, unknown_plaintext, postfix))
     cipher = encrypt_aes_ecb(cat_text, key=key, blocksize=blocksize)
     return cipher
 
@@ -413,12 +447,33 @@ def detect_ecb_blocksize(encryption_fn):
     return int(candidates.sum() / candidates.min())
 
 
-def _decrypt_byte(encryption_fn, plaintext, decrypted, blocksize=16, offset=0):
-    """Given a function that encrypts cat(known_plaintext, unknown_plaintext)
+def _decrypt_byte(encryption_fn, plaintext, decrypted, blocksize=16, offset=0,
+                  prefix_len=0):
+    """Given a function that encrypts cat(known_plaintext, unknown_plaintext):
+
     If blocksize == 8:
         encrypt(0000000?) -> target_cipher
         encrypt(0000000[0-255]), and figure out which matches target_cipher
         if 0000000A matches, A is the first char of unknown_plaintext
+
+    Parameters
+    ----------
+    encryption_fn : function with one parameter
+    plaintext : np.array of uint8
+        Plaintext to feed to encryption function.
+    decrypted : np.array of uint8, default=None
+        Previously decrypted unknown_text.
+    blocksize : int
+    offset : int
+        Number of bytes from the beginning of the plaintext to examine.
+    prefix_len : int, default=0
+        Length of random prefix to in ciphertext.
+
+    Returns
+    -------
+    (decrypted_block', {'stop'|'continue'})
+        'continue' is returned as the last element unless the 0x01 padding byte
+        is encountered.  'stop' is returned if it is.
     """
     target_block = slice(offset, offset+blocksize)
     target_cipher = encryption_fn(plaintext)[target_block]
@@ -433,14 +488,28 @@ def _decrypt_byte(encryption_fn, plaintext, decrypted, blocksize=16, offset=0):
     return np.where(np.all(cipher == target_cipher, axis=1))[0][0]
 
 
-def _decrypt_block(encryption_fn, blocksize, decrypted=None):
-    """Returns (decrypted_block', {'stop'|'continue'})
+def _decrypt_block(encryption_fn, blocksize, decrypted=None, prefix_len=0):
+    """Decrypt a single block of unknown plaintext.
 
-    'continue' is returned as the last element unless the 0x01 padding byte is
-    encountered.  Then, 'stop' is returned.
+    Parameters
+    ----------
+    encryption_fn : function with one parameter
+    blocksize : int
+    decrypted : np.array of uint8, default=None
+        Previously decrypted data
+    prefix_len : int, default=0
+        Length of random prefix in ciphertext.
+
+    Returns
+    -------
+    (np.array of uint8, str)
+        (decrypted_block, {'stop'|'continue'})
+        'continue' is returned as the last element unless the 0x01 padding byte
+        is encountered.  'stop' is returned if it is.
     """
     if decrypted is None:
         decrypted = np.array([], np.uint8)
+
     offset = decrypted.size
     for bs in reversed(range(blocksize)):
         plaintext = np.zeros(bs, dtype=np.uint8)
@@ -453,24 +522,47 @@ def _decrypt_block(encryption_fn, blocksize, decrypted=None):
     return decrypted, 'continue'
 
 
-def _decrypt_unknown_plaintext(encryption_fn, blocksize):
+def _decrypt_unknown_plaintext(encryption_fn, blocksize, prefix_len=0):
+    """Decrypt entirety of unknown_plaintext.
+
+    Parameters
+    ----------
+    encryption_fn : function with one parameter
+    blocksize : int
+    prefix_len : int, default=0
+        Length of random prefix in ciphertext.
+
+    Returns
+    -------
+    np.array of uint8
+    """
     decrypted = np.array([], dtype=np.uint8)
     status = 'continue'
     while status == 'continue':
         decrypted, status = _decrypt_block(encryption_fn, blocksize=blocksize,
-                                           decrypted=decrypted)
+                                           decrypted=decrypted,
+                                           prefix_len=prefix_len)
     return decrypted
 
 
 def byte_at_a_time_ecb_decryption(encryption_fn):
-    """Set 2 - Challenge 12
+    """Set 2 - Challenge 12  AND
+       Set 2 - Challenge 15
 
-    Given a function that encrypts cat(known_plaintext, unknown_plaintext),
+    Given a function that encrypts
+        cat(random_prefix, known_plaintext, unknown_plaintext),
     decrypt unknown_plaintext.
+
+    Returns
+    -------
+    np.array of uint8
     """
     blocksize = detect_ecb_blocksize(encryption_fn)
     assert detect_encryption_mode(encryption_fn) == 'ECB'
-    return _decrypt_unknown_plaintext(encryption_fn, blocksize=blocksize)
+    prefix_len = find_ecb_prefix_len(encryption_fn, blocksize=blocksize)
+    return _decrypt_unknown_plaintext(encryption_fn,
+                                      blocksize=blocksize,
+                                      prefix_len=prefix_len)
 
 
 def parse_kv_string(kv_string):
@@ -570,6 +662,20 @@ def create_admin_profile():
     return plain_profile
 
 
+def byte_at_a_time_ecb_decryption_harder(encryption_fn):
+    """Set 2 - Challenge 14
+
+    Given a function that encrypts
+
+        cat(random_prefix, attacker_controlled, target_bytes)
+
+    decrypt target_bytes.
+    """
+    blocksize = detect_ecb_blocksize(encryption_fn)
+    assert detect_encryption_mode(encryption_fn) == 'ECB'
+    return _decrypt_unknown_plaintext(encryption_fn, blocksize=blocksize)
+
+
 def strip_pkcs7(plaintext, blocksize):
     """Set 2 - Challenge 15
 
@@ -594,6 +700,43 @@ def strip_pkcs7(plaintext, blocksize):
             raise ValueError("Invalid pkcs7 padding.")
     else:
         return plaintext
+
+
+def _nth_encrypted_byte(size, encryption_fn, n=0):
+    plaintext = np.zeros(size, dtype=np.uint8)
+    return encryption_fn(plaintext)[n]
+
+nth_encrypted_byte = np.vectorize(_nth_encrypted_byte)
+
+
+def find_ecb_prefix_len(encryption_fn, blocksize=None):
+    """Try longer and longer plaintexts until the first byte stabilizes.
+    That's the length of the prefix; return that.
+
+    This function assumes the length of the random prefix is less than the
+    blocksize.
+    """
+    if blocksize is None:
+        blocksize = detect_ecb_blocksize(encryption_fn)
+    max_plaintext_len = blocksize * 2
+
+    # we're going to wait for the first byte to remain stable over
+    # `required_reps` plaintext sizes
+    required_reps = 3
+    sizes = np.arange(max_plaintext_len)
+    first_bytes = nth_encrypted_byte(sizes,
+                                     encryption_fn=encryption_fn,
+                                     n=0)
+
+    # repeat and lag `required_reps` times
+    tiled = np.tile(first_bytes, (required_reps, 1))
+    for i, row in enumerate(tiled):
+        tiled[i] = np.roll(tiled[i], i)
+
+    # find first time we see the first byte repeated `required_reps` times
+    is_stable = np.all(tiled == tiled[0], axis=0)
+    stable_idx = np.where(is_stable)[0][0]
+    return blocksize - stable_idx
 
 
 def _find_data_start(cipher, blocksize):
@@ -794,15 +937,10 @@ def test__decrypt_block_stop():
 
 
 def test_byte_at_a_time_ecb_decryption():
-    unknown_plaintext = afb(b"I was raised by a cup of coffee!")
-    def _test_encrypter(plaintext, blocksize=16,
-                        key=np.zeros(16, dtype=np.uint8)):
-        cat_text = np.hstack((plaintext, unknown_plaintext))
-        cipher = encrypt_aes_ecb(pkcs7(cat_text, blocksize=blocksize),
-                                 key=key, blocksize=blocksize)
-        return cipher
-    result = byte_at_a_time_ecb_decryption(_test_encrypter)
-    assert bfa(result) == bfa(unknown_plaintext)
+    unknown = afb(b"Rollin' in my 5.0\n")
+    encrypter = partial(random_ecb_encrypter, test_unknown=unknown)
+    result = byte_at_a_time_ecb_decryption(encrypter)
+    assert bfa(result) == bfa(unknown)
 
 
 def test_parse_kv_string():
@@ -810,7 +948,7 @@ def test_parse_kv_string():
     expected = {
             b'foo': b'bar',
             b'baz': b'qux',
-            b'zap': b'zazzle'
+            b'zap': b'zazzle',
             }
     kv_dict = parse_kv_string(kv_string)
     assert kv_dict == expected
@@ -821,7 +959,7 @@ def test_encode_kv_string():
     expected = {
             b'foo': b'bar',
             b'baz': b'qux',
-            b'zap': b'zazzle'
+            b'zap': b'zazzle',
             }
     kv_dict = parse_kv_string(kv_string)
     assert kv_dict == expected
@@ -892,3 +1030,11 @@ def test_strip_pkcs7_bad():
     padded = afb(b"ICE ICE BABY\x01\x02\x03\x04")
     with pytest.raises(ValueError):
         strip_pkcs7(padded, blocksize=blocksize)
+
+
+#def test_byte_at_a_time_ecb_decryption_harder():
+#    unknown = afb(b"I was raised by a cup of coffee!")
+#    encrypter = partial(random_ecb_encrypter, test_unknown=unknown,
+#                        add_prefix=True)
+#    result = byte_at_a_time_ecb_decryption_harder(encrypter)
+#    assert bfa(result) == bfa(unknown)
