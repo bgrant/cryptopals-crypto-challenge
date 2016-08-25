@@ -16,6 +16,7 @@ from functools import partial
 from collections import defaultdict, OrderedDict
 
 import numpy as np
+from scipy import linalg
 from Crypto.Cipher import AES
 
 import pytest
@@ -383,17 +384,21 @@ def detect_encryption_mode(encryption_fn, blocksize=16, force_mode=None):
     else:
         return 'CBC'
 
-min_prefix_len = min_postfix_len = 5
-max_prefix_len = max_postfix_len = 10
-prefix_len = np.random.randint(min_prefix_len, max_prefix_len)
-_PREFIX = afb(np.random.bytes(prefix_len))
-postfix_len = np.random.randint(min_postfix_len, max_postfix_len)
-_POSTFIX = afb(np.random.bytes(postfix_len))
+
+# we want these to be consistent across calls
+MIN_PREFIX_LEN = MIN_POSTFIX_LEN = 5
+MAX_PREFIX_LEN = MAX_POSTFIX_LEN = 10
+PREFIX_LEN = np.random.randint(MIN_PREFIX_LEN, MAX_PREFIX_LEN)
+_PREFIX = afb(np.random.bytes(PREFIX_LEN))
+POSTFIX_LEN = np.random.randint(MIN_POSTFIX_LEN, MAX_POSTFIX_LEN)
+_POSTFIX = afb(np.random.bytes(POSTFIX_LEN))
+
 
 def random_ecb_encrypter(plaintext, blocksize=16,
                          key=random_aes_key(blocksize=16),
                          add_prefix=False, add_postfix=False,
-                         test_unknown=None):
+                         test_unknown=None,
+                         test_prefix_len=None):
     """Set 2 - Challenge 12
 
     Encrypt data using a consistent random key.
@@ -471,11 +476,15 @@ def _decrypt_byte(encryption_fn, plaintext, decrypted, blocksize=16, offset=0,
 
     Returns
     -------
-    (decrypted_block', {'stop'|'continue'})
-        'continue' is returned as the last element unless the 0x01 padding byte
-        is encountered.  'stop' is returned if it is.
+    np.uint8 scalar
+        Value of decrypted byte
     """
-    target_block = slice(offset, offset+blocksize)
+    prefix_pad = blocksize - prefix_len
+    offset += prefix_pad
+
+    plaintext = np.pad(plaintext, (prefix_pad, 0), mode='constant')
+    target_block = slice(offset, offset + blocksize)
+
     target_cipher = encryption_fn(plaintext)[target_block]
     plain = np.hstack((plaintext, decrypted))
     plain = np.tile(plain, (2**8, 1))
@@ -485,7 +494,10 @@ def _decrypt_byte(encryption_fn, plaintext, decrypted, blocksize=16, offset=0,
     possibilities = np.hstack((plain, last_byte))
     cipher = np.apply_along_axis(encryption_fn, axis=1, arr=possibilities)
     cipher = cipher[:, target_block]  # look at target block only
-    return np.where(np.all(cipher == target_cipher, axis=1))[0][0]
+    try:
+        return np.where(np.all(cipher == target_cipher, axis=1))[0][0]
+    except IndexError:
+        raise ValueError("Can't decrypt byte.")
 
 
 def _decrypt_block(encryption_fn, blocksize, decrypted=None, prefix_len=0):
@@ -514,7 +526,8 @@ def _decrypt_block(encryption_fn, blocksize, decrypted=None, prefix_len=0):
     for bs in reversed(range(blocksize)):
         plaintext = np.zeros(bs, dtype=np.uint8)
         last_byte = _decrypt_byte(encryption_fn, plaintext, decrypted,
-                                  blocksize=blocksize, offset=offset)
+                                  blocksize=blocksize, offset=offset,
+                                  prefix_len=prefix_len)
         if last_byte == 0x01:  # it's padding; stop
             return decrypted, 'stop'
         else:
@@ -662,20 +675,6 @@ def create_admin_profile():
     return plain_profile
 
 
-def byte_at_a_time_ecb_decryption_harder(encryption_fn):
-    """Set 2 - Challenge 14
-
-    Given a function that encrypts
-
-        cat(random_prefix, attacker_controlled, target_bytes)
-
-    decrypt target_bytes.
-    """
-    blocksize = detect_ecb_blocksize(encryption_fn)
-    assert detect_encryption_mode(encryption_fn) == 'ECB'
-    return _decrypt_unknown_plaintext(encryption_fn, blocksize=blocksize)
-
-
 def strip_pkcs7(plaintext, blocksize):
     """Set 2 - Challenge 15
 
@@ -716,27 +715,33 @@ def find_ecb_prefix_len(encryption_fn, blocksize=None):
     This function assumes the length of the random prefix is less than the
     blocksize.
     """
+    required_reps = 3
     if blocksize is None:
         blocksize = detect_ecb_blocksize(encryption_fn)
-    max_plaintext_len = blocksize * 2
+    max_plaintext_len = 2*blocksize
 
     # we're going to wait for the first byte to remain stable over
     # `required_reps` plaintext sizes
-    required_reps = 3
     sizes = np.arange(max_plaintext_len)
     first_bytes = nth_encrypted_byte(sizes,
                                      encryption_fn=encryption_fn,
                                      n=0)
 
     # repeat and lag `required_reps` times
-    tiled = np.tile(first_bytes, (required_reps, 1))
-    for i, row in enumerate(tiled):
-        tiled[i] = np.roll(tiled[i], i)
+    first_col = np.zeros(required_reps - 1)
+    first_col[0] = first_bytes[0]
+    toeplitz = linalg.toeplitz(r=first_bytes, c=first_col)
 
     # find first time we see the first byte repeated `required_reps` times
-    is_stable = np.all(tiled == tiled[0], axis=0)
+    is_stable = np.all(toeplitz == toeplitz[0], axis=0)
     stable_idx = np.where(is_stable)[0][0]
-    return blocksize - stable_idx
+
+    prefix_len = blocksize - stable_idx + 1
+
+    if prefix_len >= 0:
+        return prefix_len
+    else:
+        return 0
 
 
 def _find_data_start(cipher, blocksize):
@@ -1032,9 +1037,24 @@ def test_strip_pkcs7_bad():
         strip_pkcs7(padded, blocksize=blocksize)
 
 
-#def test_byte_at_a_time_ecb_decryption_harder():
-#    unknown = afb(b"I was raised by a cup of coffee!")
-#    encrypter = partial(random_ecb_encrypter, test_unknown=unknown,
-#                        add_prefix=True)
-#    result = byte_at_a_time_ecb_decryption_harder(encrypter)
-#    assert bfa(result) == bfa(unknown)
+def test_find_ecb_prefix_len():
+    blocksize = 16
+
+    encrypter = partial(random_ecb_encrypter, add_prefix=False,
+                        blocksize=blocksize)
+    result = find_ecb_prefix_len(encrypter)
+    assert result == 0
+
+    for _ in range(5):
+        encrypter = partial(random_ecb_encrypter, add_prefix=True,
+                            blocksize=blocksize)
+        result = find_ecb_prefix_len(encrypter)
+        assert result == PREFIX_LEN
+
+
+def test_byte_at_a_time_ecb_decryption_harder():
+    unknown = afb(b"I was raised by a cup of coffee!")
+    encrypter = partial(random_ecb_encrypter, test_unknown=unknown,
+                        add_prefix=True)
+    result = byte_at_a_time_ecb_decryption(encrypter)
+    assert bfa(result) == bfa(unknown)
