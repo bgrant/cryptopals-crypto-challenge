@@ -712,8 +712,8 @@ def find_ecb_prefix_len(encryption_fn, blocksize=None):
     """Try longer and longer plaintexts until the first byte stabilizes.
     That's the length of the prefix; return that.
 
-    This function assumes the length of the random prefix is less than the
-    blocksize.
+    FIXME: This function assumes the length of the random prefix is less than
+    the blocksize.
     """
     required_reps = 3
     if blocksize is None:
